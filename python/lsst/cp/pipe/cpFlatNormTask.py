@@ -96,8 +96,7 @@ class CpFlatMeasureTask(pipeBase.PipelineTask,
             List containing the statistics.
         """
         if self.config.doVignette:
-            VignetteExposure(inputExp, doUpdateMask=True, maskPlane='BAD',
-                             doSetValue=False, log=self.log)
+            VignetteExposure(inputExp, doUpdateMask=True, doSetValue=False, log=self.log)
         mask = inputExp.getMask()
         maskVal = mask.getPlaneBitMask(self.config.maskNameList)
         statsControl = afwMath.StatisticsControl(self.config.numSigmaClip,
