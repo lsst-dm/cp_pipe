@@ -26,13 +26,16 @@ import lsst.pipe.base.connectionTypes as cT
 import lsst.afw.math as afwMath
 import lsst.afw.image as afwImage
 
+from lsst.pipe.drivers.background import (FocalPlaneBackground, MaskObjectsTask, SkyMeasurementTask,
+                                          FocalPlaneBackgroundConfig, BackgroundConfig)
+from lsst.daf.base import PropertyList
 from ._lookupStaticCalibration import lookupStaticCalibration
 from .cpCombine import CalibCombineTask
 
-from lsst.pipe.drivers.background import (FocalPlaneBackground, MaskObjectsTask, SkyMeasurementTask,
-                                          FocalPlaneBackgroundConfig, BackgroundConfig)
-
-__all__ = ["CpSkyTask", "CpSkyTaskConfig"]
+__all__ = ['CpSkyImageTask', 'CpSkyImageConfig',
+           'CpSkyScaleMeasureTask', 'CpSkyScaleMeasureConfig',
+           'CpSkySubtractBackgroundTask', 'CpSkySubtractBackgroundConfig',
+           'CpSkyCombineTask', 'CpSkyCombineConfig']
 
 
 class CpSkyImageConnections(pipeBase.PipelineTaskConnections,
@@ -40,7 +43,7 @@ class CpSkyImageConnections(pipeBase.PipelineTaskConnections,
     inputExp = cT.Input(
         name="cpSkyIsr",
         doc="Input pre-processed exposures to combine.",
-        storageClass="ExposureF",
+        storageClass="Exposure",
         dimensions=("instrument", "exposure", "detector"),
     )
     camera = cT.PrerequisiteInput(
@@ -55,7 +58,7 @@ class CpSkyImageConnections(pipeBase.PipelineTaskConnections,
     maskedExp = cT.Output(
         name="cpSkyMaskedIsr",
         doc="Output masked post-ISR exposure.",
-        storageClass="ExposureF",
+        storageClass="Exposure",
         dimensions=("instrument", "exposure", "detector"),
     )
     maskedBkg = cT.Output(
@@ -111,15 +114,15 @@ class CpSkyImageTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         CZW: Write docstring.
         """
         # Duplicate ST.processSingleBackground
-        self.maskObjects.run(inputExp, self.config.maskList)
+        self.maskTask.run(inputExp, self.config.maskList)
 
         # Duplicate ST.measureBackground
-        bgModel = FocalPlaneBackground.fromCamera(self.config.largeScalBackground, camera)
+        bgModel = FocalPlaneBackground.fromCamera(self.config.largeScaleBackground, camera)
         bgModel.addCcd(inputExp)
 
         return pipeBase.Struct(
-            outputExp=inputExp,
-            outputBkg=bgModel,
+            maskedExp=inputExp,
+            maskedBkg=bgModel,
         )
 
 
@@ -147,7 +150,7 @@ class CpSkyScaleMeasureConnections(pipeBase.PipelineTaskConnections,
     )
 
 
-class CpSkyScaleMeasureConfig(pipeBase.PiplineTaskConfig,
+class CpSkyScaleMeasureConfig(pipeBase.PipelineTaskConfig,
                               pipelineConnections=CpSkyScaleMeasureConnections):
     pass
 
@@ -169,9 +172,11 @@ class CpSkyScaleMeasureTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
             background.merge(bg)
 
         scale = np.median(background.getStatsImage().getArray())
+        scaleMD = PropertyList()
+        scaleMD.set("scale", float(scale))
         return pipeBase.Struct(
             outputBkg=background,
-            outputScale=scale,
+            outputScale=scaleMD,
         )
 
 
@@ -181,7 +186,7 @@ class CpSkySubtractBackgroundConnections(pipeBase.PipelineTaskConnections,
     inputExp = cT.Input(
         name="cpSkyMaskedIsr",
         doc="Masked post-ISR image.",
-        storageClass="ExposureF",
+        storageClass="Exposure",
         dimensions=("instrument", "exposure", "detector"),
     )
     inputBkg = cT.Input(
@@ -197,10 +202,10 @@ class CpSkySubtractBackgroundConnections(pipeBase.PipelineTaskConnections,
         dimensions=("instrument", "exposure"),
     )
 
-    outputBkg = cT.Input(
+    outputBkg = cT.Output(
         name="icExpBackground",
         doc="Normalized, static background.",
-        storageClass="FocalPlaneBackground",
+        storageClass="Background",
         dimensions=("instrument", "exposure", "detector"),
     )
 
@@ -234,9 +239,10 @@ class CpSkySubtractBackgroundTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         detector = inputExp.getDetector()
         bbox = image.getBBox()
 
+        scale = inputScale.get('scale')
         background = inputBkg.toCcdBackground(detector, bbox)
         image -= background.getImage()
-        image /= inputScale
+        image /= scale
 
         newBackground = self.sky.measureBackground(image)
         return pipeBase.Struct(
@@ -249,7 +255,7 @@ class CpSkyCombineConnections(pipeBase.PipelineTaskConnections,
     inputBkgs = cT.Input(
         name="icExpBackground",
         doc="Normalized, static background.",
-        storageClass="FocalPlaneBackground",
+        storageClass="Background",
         dimensions=("instrument", "exposure", "detector"),
         multiple=True
     )
@@ -257,7 +263,7 @@ class CpSkyCombineConnections(pipeBase.PipelineTaskConnections,
     outputCalib = cT.Output(
         name="sky",
         doc="Averaged static background.",
-        storageClass="FocalPlaneBackground",
+        storageClass="Exposure",
         dimensions=("instrument", "detector"),
         isCalibration=True,
     )
@@ -289,7 +295,8 @@ class CpSkyCombineTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         """
         skyCalib = self.sky.averageBackgrounds(inputBkgs)
         # This is a placeholder:
-        CalibCombineTask().combineHeaders(inputBkgs, skyCalib, calibType='SKY')
+        # ETA: and it doesn't work. :(
+        # CalibCombineTask().combineHeaders(inputBkgs, skyCalib, calibType='SKY')
 
         return pipeBase.Struct(
             outputCalib=skyCalib,
@@ -301,7 +308,7 @@ class CpSkyConnections(pipeBase.PipelineTaskConnections,
     inputExp = cT.Input(
         name="cpSkyISR",
         doc="Input pre-processed exposures to combine.",
-        storageClass="ExposureF",
+        storageClass="Exposure",
         dimensions=("instrument", "visit", "detector"),
     )
     camera = cT.PrerequisiteInput(
@@ -314,7 +321,7 @@ class CpSkyConnections(pipeBase.PipelineTaskConnections,
     outputExp = cT.Output(
         name="cpSkyProc",
         doc="Output combined proposed calibration.",
-        storageClass="ExposureF",
+        storageClass="Exposure",
         dimensions=("instrument", "visit", "detector"),
     )
 
