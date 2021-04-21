@@ -30,7 +30,6 @@ from lsst.pipe.drivers.background import (FocalPlaneBackground, MaskObjectsTask,
                                           FocalPlaneBackgroundConfig, BackgroundConfig)
 from lsst.daf.base import PropertyList
 from ._lookupStaticCalibration import lookupStaticCalibration
-from .cpCombine import CalibCombineTask
 
 __all__ = ['CpSkyImageTask', 'CpSkyImageConfig',
            'CpSkyScaleMeasureTask', 'CpSkyScaleMeasureConfig',
