@@ -92,8 +92,15 @@ class CpSkyImageConfig(pipeBase.PipelineTaskConfig,
     )
 
     def setDefaults(self):
-        self.largeScaleBackground.xSize = 256
-        self.largeScaleBackground.ySize = 256
+        # self.largeScaleBackground.xSize = 256
+        # self.largeScaleBackground.ySize = 256
+        # obs_subaru values
+        self.largeScaleBackground.xSize = 122.88
+        self.largeScaleBackground.ySize = 122.88
+        self.largeScaleBackground.pixelSize = 0.015
+        self.largeScaleBackground.minFrac = 0.1
+        self.largeScaleBackground.mask = ['BAD', 'SAT', 'INTRP', 'DETECTED', 'DETECTED_NEGATIVE',
+                                          'EDGE', 'NO_DATA']
 
 
 # cpSkyMaskedIsr_{per exposure,detector} = map(applyMask, list(cpSkyProc))
@@ -113,7 +120,14 @@ class CpSkyImageTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         CZW: Write docstring.
         """
         # Duplicate ST.processSingleBackground
-        self.maskTask.run(inputExp, self.config.maskList)
+        # Except: check if a detector is fully masked to avoid
+        # self.maskTask raising.
+        currentMask = inputExp.getMask()
+        badMask = currentMask.getPlaneBitMask(self.config.maskList)
+        if (currentMask.getArray() & badMask).all():
+            self.log.warn("All pixels are masked!")
+        else:
+            self.maskTask.run(inputExp, self.config.maskList)
 
         # Duplicate ST.measureBackground
         bgModel = FocalPlaneBackground.fromCamera(self.config.largeScaleBackground, camera)
@@ -170,6 +184,10 @@ class CpSkyScaleMeasureTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         for bg in inputBkgs[1:]:
             background.merge(bg)
 
+        backgroundPixels = background.getStatsImage().getArray()
+        self.log.info("Background model min/max: %f %f.  Scale %f",
+                      np.min(backgroundPixels), np.max(backgroundPixels),
+                      np.median(backgroundPixels))
         scale = np.median(background.getStatsImage().getArray())
         scaleMD = PropertyList()
         scaleMD.set("scale", float(scale))
@@ -260,10 +278,10 @@ class CpSkyCombineConnections(pipeBase.PipelineTaskConnections,
     )
 
     outputCalib = cT.Output(
-        name="sky",
+        name="skyCalib",
         doc="Averaged static background.",
         storageClass="Exposure",
-        dimensions=("instrument", "detector"),
+        dimensions=("instrument", "detector", "physical_filter"),
         isCalibration=True,
     )
 
