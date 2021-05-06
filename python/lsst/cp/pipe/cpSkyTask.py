@@ -103,9 +103,13 @@ class CpSkyImageConfig(pipeBase.PipelineTaskConfig,
                                           'EDGE', 'NO_DATA']
 
 
-# cpSkyMaskedIsr_{per exposure,detector} = map(applyMask, list(cpSkyProc))
 class CpSkyImageTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
-    """Mask the detections on the postISRCCD
+    """Mask the detections on the postISRCCD.
+
+    This task maps the MaskObjectsTask across all of the initial ISR
+    processed cpSkyIsr images to create cpSkyMaskedIsr products for
+    all (exposure, detector) values.
+
     """
     ConfigClass = CpSkyImageConfig
     _DefaultName = "CpSkyImage"
@@ -117,9 +121,27 @@ class CpSkyImageTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
     def run(self, inputExp, camera):
         """Mask the detections on the postISRCCD.
 
-        CZW: Write docstring.
+        Parameters
+        ----------
+        inputExp : `lsst.afw.image.Exposure`
+            An ISR processed exposure that will have detections
+            masked.
+        camera : `lsst.afw.cameraGeom.Camera`
+            The camera geometry for this exposure.  This is needed to
+            create the background model.
+
+        Returns
+        -------
+        results : `lsst.pipe.base.Struct`
+            The results struct containing:
+
+            ``maskedExp`` : `lsst.afw.image.Exposure`
+                The detection-masked version of the ``inputExp``.
+            ``maskedBkg`` : `lsst.pipe.drivers.FocalPlaneBackground.`
+                The partial focal plane background containing only
+                this exposure/detector's worth of data.
         """
-        # Duplicate ST.processSingleBackground
+        # As constructCalibs.py SkyTask.processSingleBackground()
         # Except: check if a detector is fully masked to avoid
         # self.maskTask raising.
         currentMask = inputExp.getMask()
@@ -129,7 +151,7 @@ class CpSkyImageTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         else:
             self.maskTask.run(inputExp, self.config.maskList)
 
-        # Duplicate ST.measureBackground
+        # As constructCalibs.py  SkyTask.measureBackground()
         bgModel = FocalPlaneBackground.fromCamera(self.config.largeScaleBackground, camera)
         bgModel.addCcd(inputExp)
 
@@ -165,21 +187,42 @@ class CpSkyScaleMeasureConnections(pipeBase.PipelineTaskConnections,
 
 class CpSkyScaleMeasureConfig(pipeBase.PipelineTaskConfig,
                               pipelineConnections=CpSkyScaleMeasureConnections):
+    # There are no configurable parameters here.
     pass
 
 
-# (bg, scales)_{per exposure} = reduce(cpSkyMaskedIsr)_{over detector}
 class CpSkyScaleMeasureTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
     """Measure per-exposure scale factors and merge focal plane backgrounds.
+
+    Merge all the per-detector partial backgrounds to a full focal
+    plane background for each exposure, and measure the scale factor
+    from that full background.
     """
     ConfigClass = CpSkyScaleMeasureConfig
     _DefaultName = "cpSkyScaleMeasure"
 
     def run(self, inputBkgs):
-        """Merge per-exposure scale factors and merge focal plane backgrounds.
+        """Merge focal plane backgrounds and measure the scale factor.
 
-        CZW: Write docstrings.
+        Parameters
+        ----------
+        inputBkgs : `list` [`lsst.pipe.drivers.FocalPlaneBackground`]
+            A list of all of the partial focal plane backgrounds, one
+            from each detector in this exposure.
+
+        Returns
+        -------
+        results : `lsst.pipe.base.Struct`
+            The results struct containing:
+
+            ``outputBkg`` : `lsst.pipe.drivers.FocalPlaneBackground`
+                The full merged background for the entire focal plane.
+            ``outputScale`` : `lsst.daf.base.PropertyList`
+                A metadata containing the median level of the
+                background, stored in the key 'scale'.
         """
+        # As constructCalibs.py SkyTask.scatterProcess()
+        # Merge into the full focal plane.
         background = inputBkgs[0]
         for bg in inputBkgs[1:]:
             background.merge(bg)
@@ -188,9 +231,13 @@ class CpSkyScaleMeasureTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         self.log.info("Background model min/max: %f %f.  Scale %f",
                       np.min(backgroundPixels), np.max(backgroundPixels),
                       np.median(backgroundPixels))
+
+        # A property list is overkill, but FocalPlaneBackground
+        # doesn't have a metadata object that this can be stored in.
         scale = np.median(background.getStatsImage().getArray())
         scaleMD = PropertyList()
         scaleMD.set("scale", float(scale))
+
         return pipeBase.Struct(
             outputBkg=background,
             outputScale=scaleMD,
@@ -220,7 +267,7 @@ class CpSkySubtractBackgroundConnections(pipeBase.PipelineTaskConnections,
     )
 
     outputBkg = cT.Output(
-        name="icExpBackground",
+        name="cpExpBackground",
         doc="Normalized, static background.",
         storageClass="Background",
         dimensions=("instrument", "exposure", "detector"),
@@ -235,10 +282,17 @@ class CpSkySubtractBackgroundConfig(pipeBase.PipelineTaskConfig,
     )
 
 
-# icExpBkg_{per exposure, detector} = map(subtractBackground(bg_{exp}, scale_{exp}),
-#                                         list(cpSkyMaskedIsr))
 class CpSkySubtractBackgroundTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
     """Subtract per-exposure background from individual detector masked images.
+
+    The cpSkyMaskedIsr images constructed by CpSkyImageTask have the
+    scaled background constructed by CpSkyScaleMeasureTask subtracted,
+    and new background models are constructed for the remaining
+    signal.
+
+    The output was called `icExpBackground` in gen2, but the product
+    created here has definition clashes that prevent that from being
+    reused.
     """
     ConfigClass = CpSkySubtractBackgroundConfig
     _DefaultName = "cpSkySubtractBkg"
@@ -250,8 +304,25 @@ class CpSkySubtractBackgroundTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
     def run(self, inputExp, inputBkg, inputScale):
         """Subtract per-exposure background from individual detector masked images.
 
-        CZW: Write docstrings.
+        Parameters
+        ----------
+        inputExp : `lsst.afw.image.Exposure`
+            The ISR processed, detection masked image.
+        inputBkg : `lsst.pipe.drivers.FocalPlaneBackground.
+            Full focal plane background for this exposure.
+        inputScale : `lsst.daf.base.PropertyList`
+            Metadata containing the scale factor.
+
+        Returns
+        -------
+        results : `lsst.pipe.base.Struct`
+            The results struct containing:
+
+            outputBkg : `lsst.afw.math.BackgroundList`
+                Remnant sky background with the full-exposure
+                component removed.
         """
+        # As constructCalibs.py SkyTask.processSingle()
         image = inputExp.getMaskedImage()
         detector = inputExp.getDetector()
         bbox = image.getBBox()
@@ -274,7 +345,14 @@ class CpSkyCombineConnections(pipeBase.PipelineTaskConnections,
         doc="Normalized, static background.",
         storageClass="Background",
         dimensions=("instrument", "exposure", "detector"),
-        multiple=True
+        multiple=True,
+    )
+    inputExps = cT.Input(
+        name="cpSkyMaskedIsr",
+        doc="Masked post-ISR image.",
+        storageClass="Exposure",
+        dimensions=("instrument", "exposure", "detector"),
+        multiple=True,
     )
 
     outputCalib = cT.Output(
@@ -294,9 +372,14 @@ class CpSkyCombineConfig(pipeBase.PipelineTaskConfig,
     )
 
 
-# skyCalib_{per detector} = reduce(icExpBkg)_{over exposure}
 class CpSkyCombineTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
     """Merge per-exposure measurements into a detector level calibration.
+
+    Each of the per-detector results from all input exposures are
+    averaged to produce the final SKY calibration.
+
+    As before, this is written to a skyCalib instead of a SKY to avoid
+    definition classes in gen3.
     """
     ConfigClass = CpSkyCombineConfig
     _DefaultName = "cpSkyCombine"
@@ -305,157 +388,27 @@ class CpSkyCombineTask(pipeBase.PipelineTask, pipeBase.CmdLineTask):
         super().__init__(**kwargs)
         self.makeSubtask("sky")
 
-    def run(self, inputBkgs):
+    def run(self, inputBkgs, inputExps):
         """Merge per-exposure measurements into a detector level calibration.
-
-        CZW: Write docstrings.
-        """
-        skyCalib = self.sky.averageBackgrounds(inputBkgs)
-        # This is a placeholder:
-        # ETA: and it doesn't work. :(
-        # CalibCombineTask().combineHeaders(inputBkgs, skyCalib, calibType='SKY')
-
-        return pipeBase.Struct(
-            outputCalib=skyCalib,
-        )
-
-
-class CpSkyConnections(pipeBase.PipelineTaskConnections,
-                       dimensions=("instrument", "visit", "detector")):
-    inputExp = cT.Input(
-        name="cpSkyISR",
-        doc="Input pre-processed exposures to combine.",
-        storageClass="Exposure",
-        dimensions=("instrument", "visit", "detector"),
-    )
-    camera = cT.PrerequisiteInput(
-        name="camera",
-        doc="Input camera for full focal plane backgrounds.",
-        storageClass="Camera",
-        dimensions=("instrument", "calibration_label"),
-    )
-
-    outputExp = cT.Output(
-        name="cpSkyProc",
-        doc="Output combined proposed calibration.",
-        storageClass="Exposure",
-        dimensions=("instrument", "visit", "detector"),
-    )
-
-
-class CpSkyTaskConfig(pipeBase.PipelineTaskConfig,
-                      pipelineConnections=CpSkyConnections):
-    maskObjects = pexConfig.ConfigurableField(
-        target=MaskObjectsTask,
-        doc="Object masker to use.",
-    )
-    maskThresh = pexConfig.Field(
-        dtype=float,
-        default=3.0,
-        doc="k-sigma threshold for masking pixels"
-    )
-    mask = pexConfig.ListField(
-        dtype=str,
-        default=["BAD", "SAT", "DETECTED", "NO_DATA"],
-        doc="Mask planes to reject.",
-    )
-
-    largeScaleBackground = pexConfig.ConfigField(
-        dtype=FocalPlaneBackgroundConfig,
-        doc="Large-scale background configuration"
-    )
-    sky = pexConfig.ConfigurableField(
-        target=SkyMeasurementTask,
-        doc="Sky measurement"
-    )
-    background = pexConfig.ConfigField(
-        dtype=BackgroundConfig,
-        doc="Background config.",
-    )
-
-    # CZW:?
-    detectSigma = pexConfig.Field(
-        dtype=float,
-        default=2.0,
-        doc="Detection PSF Gaussian sigma.",
-    )
-
-    def setDefaults(self):
-        self.largeScaleBackground.xSize = 256
-        self.largeScaleBackground.ySize = 256
-
-
-class CpSkyTask(pipeBase.PipelineTask,
-                pipeBase.CmdLineTask):
-    ConfigClass = CpSkyTaskConfig
-    _DefaultName = "cpSky"
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.makeSubtask("maskObjects")
-        self.makeSubtask("sky")
-
-    def run(self, inputExp, camera):
-        """Preprocess ISR processed exposures for combination to final SKY calibration.
-
-        DM-22534: This isn't scaling correctly, and needs fixing.
 
         Parameters
         ----------
-        inputExp : `lsst.afw.image.Exposure`
-            Pre-processed sky frame data to combine.
-        camera : `lsst.afw.cameraGeom.Camera`
-            Camera to use for focal-plane geometry.
+        inputBkgs : `list` [`lsst.afw.math.BackgroundList`]
+            Remnant backgrounds from each exposure.
+        inputExps : `list` [`lsst.afw.image.Exposure`]
+            The ISR processed, detection masked images.
 
         Returns
         -------
-        outputExp : `lsst.afw.image.Exposure`
-            Sky pre-processed data.
+        results : `lsst.pipe.base.Struct`
+            The results struct containing:
+
+            `outputCalib` : `lsst.afw.image.Exposure`
+                The final sky calibration product.
         """
-        # As constructCalibs SkyTask.processSingleBackground
-        self.maskObjects.run(inputExp, self.config.mask)
+        skyCalib = self.sky.averageBackgrounds(inputBkgs)
+        CalibCombineTask().combineHeaders(inputExps, skyCalib, calibType='SKY')
 
-        # As constructCalibs SkyTask.measureBackground
-        bgModel = FocalPlaneBackground.fromCamera(self.config.largeScaleBackground,
-                                                  camera)
-        bgModel.addCcd(inputExp)
-
-        scale = np.median(bgModel.getStatsImage().getArray())
-
-        # As constructCalibs SkyTask.scatterProcess
-        # Remeasure bkg with scaled version of the FP model removed
-        mi = inputExp.getMaskedImage()
-
-        bg = bgModel.toCcdBackground(inputExp.getDetector(), mi.getBBox())
-        mi -= bg.getImage()
-        mi /= scale
-
-        # As constructCalibs SkyTask.processSingle
-        # Make the equivalent of the gen2 icExpBackground product.
-        stats = afwMath.StatisticsControl()
-        stats.setAndMask(mi.getMask().getPlaneBitMask(self.config.background.mask))
-        stats.setNanSafe(True)
-        ctrl = afwMath.BackgroundControl(
-            self.config.background.algorithm,
-            max(int(mi.getWidth() / self.config.background.xBinSize + 0.5), 1),
-            max(int(mi.getHeight() / self.config.background.yBinSize + 0.5), 1),
-            "REDUCE_INTERP_ORDER",
-            stats,
-            self.config.background.statistic
-        )
-
-        bgNew = afwMath.makeBackground(mi, ctrl)
-        icExpBkg = afwMath.BackgroundList((
-            bgNew,
-            afwMath.stringToInterpStyle(self.config.background.algorithm),
-            afwMath.stringToUndersampleStyle("REDUCE_INTERP_ORDER"),
-            afwMath.ApproximateControl.UNKNOWN,
-            0, 0, False
-        ))
-
-        bgExp = afwImage.makeExposure(icExpBkg[0][0].getStatsImage())
-
-        # Return
         return pipeBase.Struct(
-            outputExp=bgExp,
+            outputCalib=skyCalib,
         )
