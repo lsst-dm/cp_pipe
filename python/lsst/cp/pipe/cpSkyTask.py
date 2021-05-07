@@ -23,13 +23,12 @@ import numpy as np
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 import lsst.pipe.base.connectionTypes as cT
-import lsst.afw.math as afwMath
-import lsst.afw.image as afwImage
 
 from lsst.pipe.drivers.background import (FocalPlaneBackground, MaskObjectsTask, SkyMeasurementTask,
-                                          FocalPlaneBackgroundConfig, BackgroundConfig)
+                                          FocalPlaneBackgroundConfig)
 from lsst.daf.base import PropertyList
 from ._lookupStaticCalibration import lookupStaticCalibration
+from .cpCombine import CalibCombineTask
 
 __all__ = ['CpSkyImageTask', 'CpSkyImageConfig',
            'CpSkyScaleMeasureTask', 'CpSkyScaleMeasureConfig',
